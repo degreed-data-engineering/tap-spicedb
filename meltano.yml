@@ -1,0 +1,70 @@
+version: 1
+send_anonymous_usage_stats: false
+project_id: tap-spicedb
+plugins:
+  extractors:
+  - name: tap-spicedb
+    namespace: tap_spicedb
+    executable: ./tap-spicedb.sh
+    capabilities:
+    - state
+    - catalog
+    - discover
+    - about
+    settings:
+    - name: host
+    - name: token
+      kind: password
+      sensitive: true
+    - name: extraction_mode
+      kind: options
+      options:
+      - label: Snapshot once, then Watch
+        value: incremental
+      - label: Snapshot every run
+        value: snapshot
+    - name: insecure
+      kind: boolean
+    - name: ca_cert
+    - name: ca_cert_path
+    - name: tls_server_name
+    - name: resource_types
+      kind: array
+    - name: page_size
+      kind: integer
+    - name: watch_idle_timeout_seconds
+      kind: integer
+    - name: watch_start_timeout_seconds
+      kind: integer
+    - name: watch_max_duration_seconds
+      kind: integer
+    - name: on_expired_token
+      kind: options
+      options:
+      - label: Take a new snapshot
+        value: snapshot
+      - label: Fail the run
+        value: fail
+    - name: request_timeout_seconds
+      kind: integer
+    - name: max_retries
+      kind: integer
+  loaders:
+  - name: target-jsonl
+    variant: andyh1203
+    pip_url: target-jsonl
+# One Meltano environment per SpiceDB instance: `host` (and `insecure`) are set here,
+# never in the plugin's own config. Select one with
+# `meltano --environment=<name> el tap-spicedb target-jsonl --state-id=spicedb-<name>`.
+# The pipeline also gives each environment its own target schema and state id: that,
+# not a column in the data, keeps environments apart. The token comes from
+# TAP_SPICEDB_TOKEN. Add beta, prod... as shown in the README.
+environments:
+- name: local
+  config:
+    plugins:
+      extractors:
+      - name: tap-spicedb
+        config:
+          host: $TAP_SPICEDB_LOCAL_HOST
+          insecure: true

@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__
+*.py[cod]
+.venv/
+dist/
+.pytest_cache/
+.tox/
+.meltano/
+output/
+# local test config: holds the pre-shared key
+config.json
+*.pem

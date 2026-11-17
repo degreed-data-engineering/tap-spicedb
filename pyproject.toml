@@ -1,0 +1,39 @@
+[tool.poetry]
+name = "tap-spicedb"
+version = "0.0.6"
+description = "`tap-spicedb` is Singer-compliant SpiceDB tap built with Singer SDK."
+authors = ["Degreed Data Engineering"]
+license = "Apache-2.0"
+readme = "README.md"
+packages = [{ include = "tap_spicedb" }]
+
+[tool.poetry.dependencies]
+python = ">=3.9,<3.13"
+# singer-sdk 0.48.x is the last line supporting Python 3.9 (Meltano images still on Python 3.9)
+singer-sdk = "^0.48.1"
+# authzed 1.24.1 is the last release supporting Python 3.9; newer Pythons resolve newer ones
+authzed = ">=1.24.1,<2"
+# authzed 1.24.1 allows protovalidate 0.15 and later, which require google-re2: no Python
+# 3.9 wheel for its newest releases, and building it from source needs Bazel. Before 0.15
+# it is an optional extra, so stay below 0.15 there.
+protovalidate = [{ version = "<0.15", python = "<3.10" }]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+black = "^24.0"
+flake8 = "^7.0"
+pydocstyle = "^6.3"
+isort = "^5.13"
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3 # Vertical Hanging Indent
+src_paths = "tap_spicedb"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+# CLI declaration
+tap-spicedb = 'tap_spicedb.tap:cli'

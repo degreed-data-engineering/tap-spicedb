@@ -1,0 +1,23 @@
+name: Test tap-spicedb
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pytest:
+    # ubuntu-latest is 26.04, which has no Python 3.9
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is still used by some Meltano images; 3.11 is the newer target
+        python-version: ["3.9", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install . pytest
+      - run: pytest -q tests
