@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tap-spicedb"
-version = "0.0.6"
+version = "0.0.7"
 description = "`tap-spicedb` is Singer-compliant SpiceDB tap built with Singer SDK."
 authors = ["Degreed Data Engineering"]
 license = "Apache-2.0"

@@ -100,7 +100,8 @@ class TapSpiceDB(Tap):
             "watch_idle_timeout_seconds",
             th.IntegerType,
             default=30,
-            description="End an incremental run after this long without a change",
+            description="End an incremental run after this long without a change; "
+            "SpiceDB's checkpoints don't count as one",
         ),
         th.Property(
             "watch_start_timeout_seconds",

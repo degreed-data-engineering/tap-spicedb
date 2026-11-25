@@ -5,8 +5,10 @@ production. Run a POC against a real SpiceDB as the README describes.
 """
 
 import io
+import itertools
 import json
 import threading
+import time
 from contextlib import redirect_stdout
 from typing import Any, Dict, List, Optional
 
@@ -113,6 +115,31 @@ class FakeWatchCall:
         self.cancelled.set()
 
 
+class HeartbeatWatchCall(FakeWatchCall):
+    """A Watch on PostgreSQL: the responses, then a heartbeat checkpoint every interval.
+
+    SpiceDB writes a heartbeat revision every quantization interval (5 s by default)
+    and Watch sends a checkpoint for each one, so the stream is never silent.
+    """
+
+    def __init__(self, items: List[Any], interval: float) -> None:
+        """Store the responses, the interval and when each token was first sent."""
+        super().__init__(items)
+        self.interval = interval
+        self.sent_at: Dict[str, float] = {}
+
+    def __iter__(self) -> Any:
+        """Yield each response, then heartbeat checkpoints, interval apart."""
+        heartbeats = (
+            watch_response(f"hb{n}", checkpoint=True) for n in itertools.count(1)
+        )
+        for item in itertools.chain(self.items, heartbeats):
+            if self.cancelled.wait(self.interval):
+                return
+            self.sent_at.setdefault(item.changes_through.token, time.monotonic())
+            yield item
+
+
 class FakeClient:
     """Stands in for authzed's SyncClient."""
 
@@ -131,6 +158,8 @@ class FakeClient:
             rel("group:eng", "member", "user:carol"),
         ]
         self.watch_items: List[Any] = []
+        self.heartbeat_interval: Optional[float] = None
+        self.watch_call: Any = None
         self.export_errors: List[Exception] = []
         self.export_requests: List[Any] = []
         self.watch_requests: List[Any] = []
@@ -217,9 +246,15 @@ class FakeClient:
             )
 
     def Watch(self, request: Any) -> FakeWatchCall:
-        """Return a stream of the configured responses."""
+        """Return a stream of the configured responses, with heartbeats if set."""
         self.watch_requests.append(request)
-        return FakeWatchCall(self.watch_items)
+        if self.heartbeat_interval:
+            self.watch_call = HeartbeatWatchCall(
+                self.watch_items, self.heartbeat_interval
+            )
+        else:
+            self.watch_call = FakeWatchCall(self.watch_items)
+        return self.watch_call
 
 
 @pytest.fixture
@@ -377,6 +412,39 @@ def test_idle_end_saves_the_last_revision(fake: FakeClient) -> None:
     ]
     state = {"bookmarks": {"relationships": {"zed_token": SNAPSHOT_TOKEN}}}
     assert bookmark(run_tap({}, state)["state"]) == "t2"
+
+
+def test_checkpoints_alone_end_the_run_as_caught_up(fake: FakeClient) -> None:
+    """Heartbeat checkpoints move the token forward but don't keep the run going."""
+    fake.heartbeat_interval = 0.05
+    config = {**BASE_CONFIG, "watch_max_duration_seconds": 5}
+    items = list(TapSpiceDB(config=config).connection.watch(SNAPSHOT_TOKEN, []))
+    assert items[-1] == (None, True)
+    assert all(r.is_checkpoint and not r.updates for r, _ in items[:-1])
+
+    state = {"bookmarks": {"relationships": {"zed_token": SNAPSHOT_TOKEN}}}
+    result = run_tap({"watch_max_duration_seconds": 5}, state)
+    assert "relationships" not in result["records"]
+    assert bookmark(result["state"]).startswith("hb")
+
+
+def test_a_change_restarts_the_wait_between_checkpoints(fake: FakeClient) -> None:
+    """Between checkpoints, the run ends the idle timeout after the last change."""
+    dave = rel("document:3", "viewer", "user:dave")
+    fake.heartbeat_interval = 0.05
+    fake.watch_items = [watch_response(f"q{n}", checkpoint=True) for n in range(4)]
+    fake.watch_items += [
+        watch_response("t2", (RelationshipUpdate.OPERATION_CREATE, dave)),
+        watch_response("t2", checkpoint=True),
+    ]
+    config = {**BASE_CONFIG, "watch_max_duration_seconds": 5}
+    items = list(TapSpiceDB(config=config).connection.watch(SNAPSHOT_TOKEN, []))
+    ended = time.monotonic()
+    assert items[-1] == (None, True)
+    assert [r.changes_through.token for r, _ in items[:-1] if r.updates] == ["t2"]
+    assert fake.watch_call is not None
+    idle = BASE_CONFIG["watch_idle_timeout_seconds"]
+    assert ended - fake.watch_call.sent_at["t2"] >= idle
 
 
 def test_expired_token_falls_back_to_a_snapshot(fake: FakeClient) -> None:
