@@ -48,7 +48,7 @@ Every run reads the schema first: `ReadSchema` returns the current revision (a Z
 | `tls_server_name` | | | Name to check the certificate against, when it differs from `host` |
 | `resource_types` | | all | Extract only these resource types (snapshot filter and `Watch` object types) |
 | `page_size` | | `1000` | Relationships per export page. At most the server's `--max-bulk-export-relationships-limit` (10,000 by default) |
-| `watch_idle_timeout_seconds` | | `30` | End an incremental run after this long without a change |
+| `watch_idle_timeout_seconds` | | `30` | End an incremental run after this long without a change; SpiceDB's checkpoints don't count as one |
 | `watch_start_timeout_seconds` | | `180` | Wait this long for the first change: the first read of a long backlog is one slow query. Keep it under the load balancer's idle timeout (4 min by default on Azure) |
 | `watch_max_duration_seconds` | | `1800` | End an incremental run after this long in any case |
 | `on_expired_token` | | `snapshot` | `snapshot` or `fail`, see above |
@@ -77,7 +77,7 @@ Run `tap-spicedb --about` for the full list, including the SDK's built-in settin
 - **`_sdc_deleted_at` is the extraction time**, not the time of the delete: `Watch` doesn't return commit timestamps.
 - **Expiring relationships** (`expires_at`) don't emit a `DELETE` when they expire; filter on `expires_at` downstream.
 - **Schema streams are full table and never delete:** a definition removed from the schema keeps its last row. The current schema is the rows of the latest `_SDC_EXTRACTED_AT`.
-- **How long a quiet incremental run takes depends on the datastore** (tested on SpiceDB v1.48). On PostgreSQL a caught-up `Watch` sends a checkpoint at once, so the run ends after about `watch_idle_timeout_seconds` (30 s by default) and the saved token moves forward. On the in-memory `serve-testing` no checkpoint arrives, so a quiet run waits `watch_start_timeout_seconds` (3 min by default): lower it for local tests.
+- **How long a quiet incremental run takes depends on the datastore** (tested on SpiceDB v1.48). On PostgreSQL, SpiceDB writes a heartbeat revision every `--datastore-revision-quantization-interval` (5 s by default, with `--enable-revision-heartbeat` on by default) and `Watch` sends a checkpoint for each one, so the stream is never silent. Checkpoints move the saved token forward but don't count as a change: the run ends on the first checkpoint after `watch_idle_timeout_seconds` (30 s by default) without a change. A checkpoint means every change up to it was sent, so ending on one loses nothing. On the in-memory `serve-testing` no checkpoint arrives, so a quiet run waits `watch_start_timeout_seconds` (3 min by default): lower it for local tests.
 - **No gRPC keepalive** (from SpiceDB's source, not run). SpiceDB v1.48 sets no keepalive enforcement policy (`pkg/cmd/util/util.go`), so gRPC's default applies and it rejects client pings more often than every 5 minutes, longer than the Azure load balancer's 4-minute idle timeout. A connection the load balancer drops while idle ends the run like a disconnect: the next run continues, and nothing is lost.
 - **SpiceDB drops a Watch whose reader is slow** (from SpiceDB's source, not run; `RESOURCE_EXHAUSTED`, "watch disconnected": its buffer is 1,024 revisions with a 1s write timeout), e.g. while the target flushes a batch. The run ends early and the next one continues; a backlog that never finishes needs more frequent runs.
 - "Caught up" is inferred from `watch_idle_timeout_seconds` without a change. A source that changes constantly ends on `watch_max_duration_seconds` instead, and the next run continues. A long backlog can make the first message slow (one slow read), so the first wait is `watch_start_timeout_seconds`.
@@ -91,7 +91,7 @@ poetry run pytest            # offline tests against a fake gRPC client
 poetry run tap-spicedb --about
 ```
 
-The tests drive the whole tap (`sync_all`) through snapshot, incremental changes including deletes, expired tokens, interrupted exports and the time limit, with real `authzed` protobuf messages.
+The tests drive the whole tap (`sync_all`) through snapshot, incremental changes including deletes, expired tokens, interrupted exports, PostgreSQL's heartbeat checkpoints and the time limit, with real `authzed` protobuf messages.
 
 ### Against a local SpiceDB
 
@@ -132,7 +132,7 @@ plugins:
   extractors:
     - name: tap-spicedb
       namespace: tap_spicedb
-      pip_url: git+https://github.com/degreed-data-engineering/tap-spicedb@v0.0.6
+      pip_url: git+https://github.com/degreed-data-engineering/tap-spicedb@v0.0.7
       capabilities:
         - state
         - catalog

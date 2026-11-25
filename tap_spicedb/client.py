@@ -207,14 +207,17 @@ class SpiceDBConnection:
     def watch(
         self, start_token: str, resource_types: List[str]
     ) -> Iterator[Tuple[Any, bool]]:
-        """Yield (WatchResponse, False) from start_token until the stream goes idle.
+        """Yield (WatchResponse, False) from start_token until it has caught up.
 
-        "Caught up" means no message for `watch_idle_timeout_seconds`, counted from
-        the first message; before it the wait is `watch_start_timeout_seconds`, as
-        the first read of a long backlog is one slow query. With checkpoints asked
-        for, PostgreSQL sends one at once when caught up, so a quiet run ends after
-        the idle timeout; the in-memory datastore sends nothing, so it waits the
-        start timeout (tested on SpiceDB v1.48). The run also stops after
+        "Caught up" means no change for `watch_idle_timeout_seconds`. On PostgreSQL,
+        SpiceDB writes a heartbeat revision every quantization interval (5 s by
+        default) and Watch sends a checkpoint for each one, so the stream is never
+        silent: the run ends on the first checkpoint after that long without a
+        change. A checkpoint means every change up to it was sent, so ending on one
+        loses nothing. The in-memory datastore sends nothing, so there the run ends
+        after that long without any message (tested on SpiceDB v1.48). Before the
+        first message the wait is `watch_start_timeout_seconds`, as the first read
+        of a long backlog is one slow query. The run also stops after
         `watch_max_duration_seconds`, or when SpiceDB drops the stream. The last item
         is (None, True) when the watch caught up, or (None, False) when it stopped
         early: the next run continues from the saved token.
@@ -231,21 +234,12 @@ class SpiceDBConnection:
 
         idle_timeout = self.config["watch_start_timeout_seconds"]
         deadline = time.monotonic() + self.config["watch_max_duration_seconds"]
+        last_change = time.monotonic()
         call = self.client.Watch(request)
         responses = _read_in_background(call)
         try:
             while True:
-                try:
-                    item = _next_response(responses, idle_timeout, deadline)
-                except grpc.RpcError as e:
-                    if e.code() == grpc.StatusCode.UNIMPLEMENTED:
-                        raise WatchUnavailableError(
-                            f"SpiceDB at {self.host} doesn't serve the Watch API"
-                            f" ({e.details()}). On PostgreSQL enable"
-                            " `track_commit_timestamp = on`, or set"
-                            " extraction_mode: snapshot"
-                        ) from None
-                    raise
+                item = self._next_watch_response(responses, idle_timeout, deadline)
                 if item is _IDLE:
                     self.logger.info("Watch idle for %ss: caught up", idle_timeout)
                     yield None, True
@@ -261,8 +255,34 @@ class SpiceDBConnection:
                     return
                 idle_timeout = self.config["watch_idle_timeout_seconds"]
                 yield item, False
+                # Checkpoints move the saved token forward but aren't a change
+                now = time.monotonic()
+                if item.updates or item.schema_updated:
+                    last_change = now
+                elif item.is_checkpoint and now - last_change >= idle_timeout:
+                    self.logger.info(
+                        "No change for %ss, only checkpoints: caught up", idle_timeout
+                    )
+                    yield None, True
+                    return
         finally:
             call.cancel()
+
+    def _next_watch_response(
+        self, responses: "queue.Queue[Any]", idle_timeout: float, deadline: float
+    ) -> Any:
+        """Return _next_response, explaining a SpiceDB that doesn't serve Watch."""
+        try:
+            return _next_response(responses, idle_timeout, deadline)
+        except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.UNIMPLEMENTED:
+                raise WatchUnavailableError(
+                    f"SpiceDB at {self.host} doesn't serve the Watch API"
+                    f" ({e.details()}). On PostgreSQL enable"
+                    " `track_commit_timestamp = on`, or set"
+                    " extraction_mode: snapshot"
+                ) from None
+            raise
 
 
 # Markers passed between the Watch reader thread and the tap
